@@ -116,18 +116,19 @@ def _strip_html(text: str) -> str:
 
 
 def fetch_book_details(title: str, author: str) -> dict:
-    """Fetch book details from Google Books API. Uses session_state as cache."""
+    """Fetch book details from Google Books API using key from Streamlit secrets."""
     cache_key = f"_bd_{title}_{author}"
     if cache_key in st.session_state:
         return st.session_state[cache_key]
 
     empty = {"summary": "", "description": "", "pages": None, "year": None}
     try:
+        api_key = st.secrets["GOOGLE_BOOKS_KEY"]
         items: list = []
         for query in [f'intitle:"{title}" inauthor:"{author}"', f'intitle:"{title}"']:
             resp = requests.get(
                 "https://www.googleapis.com/books/v1/volumes",
-                params={"q": query, "maxResults": 1},
+                params={"q": query, "maxResults": 1, "key": api_key},
                 timeout=8,
             )
             resp.raise_for_status()
