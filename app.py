@@ -137,7 +137,7 @@ def fetch_genre_books(genre: str, limit: int = 50) -> list[dict]:
                 "subject": subject,
                 "limit": limit,
                 "sort": "rating",
-                "fields": "title,author_name,first_publish_year",
+                "fields": "title,author_name,first_publish_year,cover_i",
             },
             timeout=10,
         )
@@ -148,8 +148,10 @@ def fetch_genre_books(genre: str, limit: int = 50) -> list[dict]:
                 authors = doc.get("author_name", [])
                 author  = authors[0].strip() if authors else ""
                 year    = doc.get("first_publish_year")
+                cover_i = doc.get("cover_i")
+                cover_url = f"https://covers.openlibrary.org/b/id/{cover_i}-M.jpg" if cover_i else ""
                 if title and author and year and int(year) >= 2000:
-                    results.append({"title": title, "author": author, "genres": [genre]})
+                    results.append({"title": title, "author": author, "genres": [genre], "cover_url": cover_url})
             return results
     except Exception:
         pass
@@ -169,14 +171,14 @@ def fetch_book_details(title: str, author: str) -> dict:
     1. Open Library search → work details (pages, year, description)
     2. Wikipedia fallback for description if OL has none
     """
-    result = {"summary": "", "description": "", "pages": None, "year": None}
+    result = {"summary": "", "description": "", "pages": None, "year": None, "cover_url": ""}
 
     # ── Open Library: search for work key + metadata ───────────────────────
     try:
         r = requests.get(
             "https://openlibrary.org/search.json",
             params={"title": title, "author": author, "limit": 1,
-                    "fields": "key,number_of_pages_median,first_publish_year"},
+                    "fields": "key,number_of_pages_median,first_publish_year,cover_i"},
             timeout=10,
         )
         if r.status_code == 200:
@@ -185,6 +187,9 @@ def fetch_book_details(title: str, author: str) -> dict:
                 doc = docs[0]
                 result["pages"] = doc.get("number_of_pages_median") or None
                 result["year"]  = str(doc.get("first_publish_year") or "") or None
+                cover_i = doc.get("cover_i")
+                if cover_i:
+                    result["cover_url"] = f"https://covers.openlibrary.org/b/id/{cover_i}-L.jpg"
                 # Fetch work details for description
                 work_key = doc.get("key", "")  # e.g. "/works/OL12345W"
                 if work_key:
@@ -247,12 +252,21 @@ def _book_dialog(b: dict, details: dict) -> None:
     priority = b.get("priority")
     c = get_theme()
 
-    st.markdown(f"## {b['title']}")
-    st.markdown(f"*by **{b['author']}***")
-
-    col1, col2 = st.columns(2)
-    col1.markdown(f"**📅 Published:** {details.get('year') or '—'}")
-    col2.markdown(f"**📄 Pages:** {details.get('pages') or '—'}")
+    cover_url = details.get("cover_url") or b.get("cover_url") or ""
+    if cover_url:
+        cc, ct = st.columns([1, 3])
+        cc.markdown(f'<img src="{cover_url}" style="width:100%;border-radius:8px;">', unsafe_allow_html=True)
+        with ct:
+            st.markdown(f"## {b['title']}")
+            st.markdown(f"*by **{b['author']}***")
+            st.markdown(f"**📅 Published:** {details.get('year') or '—'}")
+            st.markdown(f"**📄 Pages:** {details.get('pages') or '—'}")
+    else:
+        st.markdown(f"## {b['title']}")
+        st.markdown(f"*by **{b['author']}***")
+        col1, col2 = st.columns(2)
+        col1.markdown(f"**📅 Published:** {details.get('year') or '—'}")
+        col2.markdown(f"**📄 Pages:** {details.get('pages') or '—'}")
 
     meta_parts = []
     if priority:
@@ -1052,12 +1066,16 @@ def page_recommendations(books: list[dict]) -> None:
         genres_html = "".join(f'<span class="genre-tag">{_e(g)}</span>' for g in (b.get("genres") or []))
         summary     = details.get("summary") or ""
         short_sum   = (summary[:110] + "…") if len(summary) > 110 else summary
+        cover_url   = details.get("cover_url") or b.get("cover_url") or ""
+        cover_html  = (f'<img src="{cover_url}" style="width:80px;height:120px;object-fit:cover;'
+                       f'border-radius:6px;margin-bottom:12px;" onerror="this.style.display=\'none\'">')  \
+                      if cover_url else '<div style="font-size:36px;margin-bottom:12px;">📘</div>'
 
         with col:
             st.markdown(f"""
             <div style="background:{card_bg};border:1px solid #6c63ff44;border-radius:14px;
                  padding:18px 16px 14px;margin-bottom:8px;">
-                <div style="font-size:26px;margin-bottom:10px;">📘</div>
+                {cover_html}
                 <div style="font-size:14px;font-weight:700;color:{c['text']};
                      margin-bottom:3px;line-height:1.3;">{_e(b['title'])}</div>
                 <div style="font-size:12px;color:{c['muted']};margin-bottom:8px;">{_e(b['author'])}</div>
@@ -1082,15 +1100,20 @@ def page_recommendations(books: list[dict]) -> None:
             genres_html = "".join(f'<span class="genre-tag">{_e(g)}</span>' for g in (b.get("genres") or []))
             summary     = details.get("summary") or ""
             short_sum   = (summary[:130] + "…") if len(summary) > 130 else summary
+            cover_url   = details.get("cover_url") or b.get("cover_url") or ""
+            cover_html  = (f'<img src="{cover_url}" style="width:48px;height:70px;object-fit:cover;'
+                           f'border-radius:4px;flex-shrink:0;" onerror="this.style.display=\'none\'">') \
+                          if cover_url else '<div style="font-size:28px;flex-shrink:0;">📘</div>'
 
             st.markdown(f"""
-            <div class="book-card">
-                <div class="book-card-spine" style="background:linear-gradient(180deg,#6c63ff,#a78bfa);"></div>
-                <div class="book-card-body">
+            <div style="display:flex;align-items:flex-start;gap:14px;background:{card_bg};
+                 border:1px solid {c['border']};border-radius:12px;padding:14px;margin-bottom:10px;">
+                {cover_html}
+                <div style="flex:1;min-width:0;">
                     <div style="font-size:14px;font-weight:700;color:{c['text']};margin-bottom:2px;">{_e(b['title'])}</div>
                     <div style="font-size:12px;color:{c['muted']};margin-bottom:6px;">{_e(b['author'])}</div>
-                    <div class="book-card-tags">{genres_html}</div>
-                    <div style="font-size:12px;color:{c['body']};line-height:1.5;margin-top:6px;">{_e(short_sum)}</div>
+                    <div style="margin-bottom:4px;">{genres_html}</div>
+                    <div style="font-size:12px;color:{c['body']};line-height:1.5;">{_e(short_sum)}</div>
                     <div style="font-size:11px;color:#a78bfa;margin-top:4px;">✦ {_e(b.get('reason', ''))}</div>
                 </div>
             </div>
