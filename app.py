@@ -115,84 +115,77 @@ def _strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", " ", text).strip()
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def fetch_book_details(title: str, author: str) -> dict:
     """
-    1. Google Books API (if GOOGLE_BOOKS_KEY secret exists)
-    2. Wikipedia for description + Open Library for pages/year
-    Never caches failures — raises so st.cache_data skips caching.
+    1. Open Library search → work details (pages, year, description)
+    2. Wikipedia fallback for description if OL has none
     """
     result = {"summary": "", "description": "", "pages": None, "year": None}
 
-    # ── Google Books ───────────────────────────────────────────────────────
-    try:
-        api_key = st.secrets.get("GOOGLE_BOOKS_KEY", "")
-        if api_key:
-            for query in [f'intitle:"{title}" inauthor:"{author}"', f'intitle:"{title}"']:
-                r = requests.get(
-                    "https://www.googleapis.com/books/v1/volumes",
-                    params={"q": query, "maxResults": 1, "key": api_key},
-                    timeout=8,
-                )
-                r.raise_for_status()
-                items = r.json().get("items", [])
-                if items:
-                    info = items[0]["volumeInfo"]
-                    desc = _strip_html(info.get("description", ""))
-                    result.update({
-                        "description": desc,
-                        "summary":     (desc[:220] + "…") if len(desc) > 220 else desc,
-                        "pages":       info.get("pageCount") or None,
-                        "year":        (info.get("publishedDate", "") or "")[:4] or None,
-                    })
-                    return result
-    except Exception:
-        pass
-
-    # ── Open Library: pages + year ─────────────────────────────────────────
+    # ── Open Library: search for work key + metadata ───────────────────────
     try:
         r = requests.get(
             "https://openlibrary.org/search.json",
             params={"title": title, "author": author, "limit": 1,
-                    "fields": "number_of_pages_median,first_publish_year"},
-            timeout=6,
+                    "fields": "key,number_of_pages_median,first_publish_year"},
+            timeout=10,
         )
-        r.raise_for_status()
-        docs = r.json().get("docs", [])
-        if docs:
-            result["pages"] = docs[0].get("number_of_pages_median") or None
-            result["year"]  = str(docs[0].get("first_publish_year") or "") or None
+        if r.status_code == 200:
+            docs = r.json().get("docs", [])
+            if docs:
+                doc = docs[0]
+                result["pages"] = doc.get("number_of_pages_median") or None
+                result["year"]  = str(doc.get("first_publish_year") or "") or None
+                # Fetch work details for description
+                work_key = doc.get("key", "")  # e.g. "/works/OL12345W"
+                if work_key:
+                    r2 = requests.get(
+                        f"https://openlibrary.org{work_key}.json",
+                        timeout=10,
+                    )
+                    if r2.status_code == 200:
+                        work = r2.json()
+                        desc_raw = work.get("description", "")
+                        if isinstance(desc_raw, dict):
+                            desc_raw = desc_raw.get("value", "")
+                        desc = _strip_html(str(desc_raw)).strip()
+                        if desc:
+                            result["description"] = desc
+                            result["summary"] = (desc[:220] + "…") if len(desc) > 220 else desc
     except Exception:
         pass
 
-    # ── Wikipedia: description ─────────────────────────────────────────────
-    try:
-        r = requests.get(
-            "https://en.wikipedia.org/w/api.php",
-            params={"action": "query", "list": "search", "format": "json",
-                    "srsearch": f"{title} {author} book", "srlimit": 1},
-            timeout=6,
-        )
-        r.raise_for_status()
-        hits = r.json().get("query", {}).get("search", [])
-        if hits:
-            pid = hits[0]["pageid"]
-            r2 = requests.get(
+    # ── Wikipedia fallback for description ────────────────────────────────
+    if not result["description"]:
+        try:
+            r = requests.get(
                 "https://en.wikipedia.org/w/api.php",
-                params={"action": "query", "prop": "extracts", "exintro": 1,
-                        "explaintext": 1, "pageids": pid, "format": "json"},
-                timeout=6,
+                params={"action": "query", "list": "search", "format": "json",
+                        "srsearch": f"{title} {author} book", "srlimit": 1},
+                timeout=8,
             )
-            r2.raise_for_status()
-            raw = (r2.json().get("query", {})
-                   .get("pages", {}).get(str(pid), {})
-                   .get("extract", "").strip())
-            paras = [p.strip() for p in raw.split("\n") if p.strip()]
-            desc  = " ".join(paras[:2])
-            result["description"] = desc
-            result["summary"]     = (desc[:220] + "…") if len(desc) > 220 else desc
-    except Exception:
-        pass
+            if r.status_code == 200:
+                hits = r.json().get("query", {}).get("search", [])
+                if hits:
+                    pid = hits[0]["pageid"]
+                    r2 = requests.get(
+                        "https://en.wikipedia.org/w/api.php",
+                        params={"action": "query", "prop": "extracts", "exintro": 1,
+                                "explaintext": 1, "pageids": pid, "format": "json"},
+                        timeout=8,
+                    )
+                    if r2.status_code == 200:
+                        raw = (r2.json().get("query", {})
+                               .get("pages", {}).get(str(pid), {})
+                               .get("extract", "").strip())
+                        paras = [p.strip() for p in raw.split("\n") if p.strip()]
+                        desc  = " ".join(paras[:2])
+                        if desc:
+                            result["description"] = desc
+                            result["summary"] = (desc[:220] + "…") if len(desc) > 220 else desc
+        except Exception:
+            pass
 
     return result
 
@@ -200,13 +193,14 @@ def fetch_book_details(title: str, author: str) -> dict:
 @st.dialog("📚 Book details")
 def _book_dialog(b: dict, details: dict) -> None:
     priority = b.get("priority")
+    c = get_theme()
 
-    st.markdown(f"### {b['title']}")
-    st.markdown(f"*by {b['author']}*")
+    st.markdown(f"## {b['title']}")
+    st.markdown(f"*by **{b['author']}***")
 
     col1, col2 = st.columns(2)
-    col1.metric("📅 Published", details.get("year") or "—")
-    col2.metric("📄 Pages", details.get("pages") or "—")
+    col1.markdown(f"**📅 Published:** {details.get('year') or '—'}")
+    col2.markdown(f"**📄 Pages:** {details.get('pages') or '—'}")
 
     meta_parts = []
     if priority:
@@ -920,8 +914,12 @@ def page_add_book(books: list[dict]) -> None:
 
 def page_recommendations(books: list[dict]) -> None:
     c = get_theme()
+
+    def _e(t: str) -> str:
+        return html_lib.escape(str(t))
+
     st.markdown('<div class="page-title">For You</div>', unsafe_allow_html=True)
-    st.markdown('<div class="page-subtitle">Recommendations based on your taste</div>', unsafe_allow_html=True)
+    st.markdown('<div class="page-subtitle">Personalized picks based on your reading taste</div>', unsafe_allow_html=True)
 
     read = [b for b in books if b["status"] == "Read"]
     want = [b for b in books if b["status"] == "Want to Read"]
@@ -936,7 +934,7 @@ def page_recommendations(books: list[dict]) -> None:
     # Build taste profile from books rated 4+
     liked = [b for b in read if (b.get("rating") or 0) >= 4]
     if not liked:
-        liked = read  # fallback: use all read books
+        liked = read
 
     liked_genres:  dict[str, int] = {}
     liked_authors: set[str] = set()
@@ -969,151 +967,94 @@ def page_recommendations(books: list[dict]) -> None:
         elif priority == 2:
             score += 1
 
-        if score > 0:
-            scored.append((score, b, reasons))
-
-    if not scored:
-        st.info("Not enough data to make recommendations yet. Rate more books to help us learn your taste.")
-        return
+        scored.append((score, b, reasons))
 
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    # ── Debug panel ───────────────────────────────────────────────────────────
-    with st.expander("🔧 Debug API (remove after fix)"):
-        test_title  = "The Almanack of Naval Ravikant"
-        test_author = "Eric Jorgenson"
-        if st.button("Test APIs now", key="debug_api_btn"):
-            st.write(f"Testing: **{test_title}** by {test_author}")
+    # Pre-fetch details for top 8 books
+    top8 = scored[:8]
+    book_details: dict[str, dict] = {}
+    with st.spinner("Loading book details…"):
+        for _, b, _ in top8:
+            book_details[b["id"]] = fetch_book_details(b["title"], b["author"])
 
-            # Google Books
-            try:
-                api_key = st.secrets.get("GOOGLE_BOOKS_KEY", "")
-                st.write(f"Google Books key present: `{bool(api_key)}`")
-                if api_key:
-                    r = requests.get(
-                        "https://www.googleapis.com/books/v1/volumes",
-                        params={"q": f'intitle:"{test_title}"', "maxResults": 1, "key": api_key},
-                        timeout=8,
-                    )
-                    st.write(f"Google Books status: `{r.status_code}`")
-                    if r.status_code == 200:
-                        items = r.json().get("items", [])
-                        st.write(f"Google Books items: `{len(items)}`")
-                        if items:
-                            info = items[0]["volumeInfo"]
-                            st.write(f"pageCount: `{info.get('pageCount')}` | publishedDate: `{info.get('publishedDate')}` | description[:100]: `{(info.get('description') or '')[:100]}`")
-                    else:
-                        st.write(f"Google Books error body: `{r.text[:300]}`")
-            except Exception as ex:
-                st.write(f"Google Books exception: `{ex}`")
+    top3  = scored[:3]
+    rest5 = scored[3:8]
 
-            # Open Library
-            try:
-                r2 = requests.get(
-                    "https://openlibrary.org/search.json",
-                    params={"title": test_title, "author": test_author, "limit": 1,
-                            "fields": "number_of_pages_median,first_publish_year"},
-                    timeout=8,
-                )
-                st.write(f"Open Library status: `{r2.status_code}`")
-                if r2.status_code == 200:
-                    docs = r2.json().get("docs", [])
-                    st.write(f"Open Library docs: `{docs}`")
-                else:
-                    st.write(f"Open Library error: `{r2.text[:200]}`")
-            except Exception as ex:
-                st.write(f"Open Library exception: `{ex}`")
+    # ── Top 3 Picks ───────────────────────────────────────────────────────────
+    card_bg = "#12151f" if c["bg"] == "#0f1117" else "#f0f2f5"
 
-            # Wikipedia
-            try:
-                r3 = requests.get(
-                    "https://en.wikipedia.org/w/api.php",
-                    params={"action": "query", "list": "search", "format": "json",
-                            "srsearch": f"{test_title} {test_author} book", "srlimit": 1},
-                    timeout=8,
-                )
-                st.write(f"Wikipedia search status: `{r3.status_code}`")
-                if r3.status_code == 200:
-                    hits = r3.json().get("query", {}).get("search", [])
-                    st.write(f"Wikipedia hits: `{len(hits)}`")
-                    if hits:
-                        st.write(f"Wikipedia top hit title: `{hits[0].get('title')}`")
-                        pid = hits[0]["pageid"]
-                        r4 = requests.get(
-                            "https://en.wikipedia.org/w/api.php",
-                            params={"action": "query", "prop": "extracts", "exintro": 1,
-                                    "explaintext": 1, "pageids": pid, "format": "json"},
-                            timeout=8,
-                        )
-                        st.write(f"Wikipedia extract status: `{r4.status_code}`")
-                        if r4.status_code == 200:
-                            raw = (r4.json().get("query", {}).get("pages", {})
-                                   .get(str(pid), {}).get("extract", ""))
-                            st.write(f"Wikipedia extract[:200]: `{raw[:200]}`")
-                else:
-                    st.write(f"Wikipedia error: `{r3.text[:200]}`")
-            except Exception as ex:
-                st.write(f"Wikipedia exception: `{ex}`")
-
-    # Fetch details for top 7 books
-    all_scored = scored[:7]
-    book_details = {}
-    with st.spinner("A carregar detalhes dos livros…"):
-        for _, b, _ in all_scored:
-            try:
-                book_details[b["id"]] = fetch_book_details(b["title"], b["author"])
-            except Exception:
-                book_details[b["id"]] = {"summary": "", "description": "", "pages": None, "year": None}
-
-
-    def _e(t: str) -> str:
-        return html_lib.escape(str(t))
-
-    def _render_card(b: dict, details: dict, reasons: list, spine_color: str, large: bool = False) -> None:
-        priority    = b.get("priority")
+    st.markdown(
+        '<div class="section-card" style="border:1px solid #6c63ff44;">'
+        '<div class="section-title">⭐ Top Picks For You</div>',
+        unsafe_allow_html=True,
+    )
+    cols = st.columns(3)
+    for col, (_, b, reasons) in zip(cols, top3):
+        details     = book_details[b["id"]]
         genres_html = "".join(f'<span class="genre-tag">{_e(g)}</span>' for g in (b.get("genres") or []))
-        p_html      = f'<span class="priority-badge priority-{priority}">{PRIORITY_LABEL[priority]}</span>' if priority else ""
-        summary     = details.get("summary", "")
-        summary_html = (f'<div style="font-size:{"13" if large else "12"}px;color:{c["body"]};'
-                        f'line-height:1.6;margin:8px 0 4px;">{_e(summary)}</div>') if summary else ""
-        r_text      = _e(reasons[0]) if reasons else ""
-        title_size  = "18px" if large else "14px"
+        summary     = details.get("summary") or ""
+        short_sum   = (summary[:110] + "…") if len(summary) > 110 else summary
+        reason_html = f'<div style="font-size:11px;color:#a78bfa;margin-top:6px;">✦ {_e(reasons[0])}</div>' if reasons else ""
 
-        st.markdown(f"""<div class="book-card">
-<div class="book-card-spine" style="background:linear-gradient(180deg,{spine_color});"></div>
-<div class="book-card-body">
-<div style="font-size:{title_size};font-weight:700;color:{c['text']};margin-bottom:2px;">{_e(b['title'])}</div>
-<div style="font-size:12px;color:{c['muted']};margin-bottom:6px;">{_e(b['author'])}</div>
-<div class="book-card-tags">{p_html}{genres_html}</div>
-{summary_html}
-<div style="font-size:11px;color:{c['muted']};margin-top:4px;">{r_text}</div>
-</div></div>""", unsafe_allow_html=True)
+        with col:
+            st.markdown(f"""
+            <div style="background:{card_bg};border:1px solid #6c63ff44;border-radius:14px;
+                 padding:18px 16px 14px;margin-bottom:8px;">
+                <div style="font-size:26px;margin-bottom:10px;">📘</div>
+                <div style="font-size:14px;font-weight:700;color:{c['text']};
+                     margin-bottom:3px;line-height:1.3;">{_e(b['title'])}</div>
+                <div style="font-size:12px;color:{c['muted']};margin-bottom:8px;">{_e(b['author'])}</div>
+                <div style="margin-bottom:6px;">{genres_html}</div>
+                <div style="font-size:12px;color:{c['body']};line-height:1.5;min-height:36px;">{_e(short_sum)}</div>
+                {reason_html}
+            </div>
+            """, unsafe_allow_html=True)
+            if st.button("View details", key=f"top_{b['id']}", use_container_width=True):
+                _book_dialog(b, details)
 
-        if st.button("📖 More details", key=f"details_{b['id']}", use_container_width=False):
-            _book_dialog(b, details)
-
-    # Top pick
-    top_score, top_book, top_reasons = scored[0]
-    st.markdown('<div class="section-card" style="border:1px solid #6c63ff44;"><div class="section-title">⭐ Top Pick</div>', unsafe_allow_html=True)
-    _render_card(top_book, book_details[top_book["id"]], top_reasons, "#6c63ff,#a78bfa", large=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # Other recommendations
-    rest = scored[1:7]
-    if rest:
-        st.markdown('<div class="section-card"><div class="section-title">📚 Also recommended</div>', unsafe_allow_html=True)
-        for _, b, reasons in rest:
-            _render_card(b, book_details[b["id"]], reasons, "#6c63ff,#a78bfa")
+    # ── 5 More Recommendations ────────────────────────────────────────────────
+    if rest5:
+        st.markdown(
+            '<div class="section-card"><div class="section-title">📚 More Recommendations</div>',
+            unsafe_allow_html=True,
+        )
+        for _, b, reasons in rest5:
+            details     = book_details[b["id"]]
+            genres_html = "".join(f'<span class="genre-tag">{_e(g)}</span>' for g in (b.get("genres") or []))
+            priority    = b.get("priority")
+            p_html      = f'<span class="priority-badge priority-{priority}">{PRIORITY_LABEL[priority]}</span>' if priority else ""
+            summary     = details.get("summary") or ""
+            short_sum   = (summary[:130] + "…") if len(summary) > 130 else summary
+            reason_txt  = _e(reasons[0]) if reasons else ""
+
+            st.markdown(f"""
+            <div class="book-card">
+                <div class="book-card-spine" style="background:linear-gradient(180deg,#6c63ff,#a78bfa);"></div>
+                <div class="book-card-body">
+                    <div style="font-size:14px;font-weight:700;color:{c['text']};margin-bottom:2px;">{_e(b['title'])}</div>
+                    <div style="font-size:12px;color:{c['muted']};margin-bottom:6px;">{_e(b['author'])}</div>
+                    <div class="book-card-tags">{p_html}{genres_html}</div>
+                    <div style="font-size:12px;color:{c['body']};line-height:1.5;margin-top:6px;">{_e(short_sum)}</div>
+                    <div style="font-size:11px;color:#a78bfa;margin-top:4px;">{reason_txt}</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            if st.button("View details", key=f"rec_{b['id']}", use_container_width=False):
+                _book_dialog(b, details)
+
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Taste profile
+    # ── Taste profile ─────────────────────────────────────────────────────────
     if liked_genres:
         st.markdown('<div class="section-card"><div class="section-title">🎨 Your taste profile</div>', unsafe_allow_html=True)
         top_genres = sorted(liked_genres.items(), key=lambda x: x[1], reverse=True)[:6]
         cols = st.columns(len(top_genres))
         for col, (genre, score) in zip(cols, top_genres):
             col.markdown(f"""
-            <div style="text-align:center;padding:12px 8px;background:{'#1a1d27' if c['bg']=='#0f1117' else '#f0f2f5'};
+            <div style="text-align:center;padding:12px 8px;background:{card_bg};
                  border-radius:10px;border:1px solid {c['border']};">
                 <div style="font-size:20px;margin-bottom:4px;">📖</div>
                 <div style="font-size:12px;font-weight:600;color:{c['text']};">{genre}</div>
