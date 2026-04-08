@@ -4,6 +4,7 @@ import io
 from datetime import datetime, date
 from pathlib import Path
 
+import requests
 import streamlit as st
 import pandas as pd
 
@@ -104,6 +105,41 @@ def books_to_csv(books: list[dict]) -> str:
         row["priority"] = PRIORITY_LABEL.get(b.get("priority") or 0, "")
         writer.writerow(row)
     return output.getvalue()
+
+
+# ── Open Library descriptions ─────────────────────────────────────────────────
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_description(title: str, author: str) -> str:
+    """Fetch a book description from Open Library. Cached for 24h."""
+    try:
+        search = requests.get(
+            "https://openlibrary.org/search.json",
+            params={"title": title, "author": author, "limit": 1, "fields": "key"},
+            timeout=5,
+        )
+        search.raise_for_status()
+        docs = search.json().get("docs", [])
+        if not docs:
+            return ""
+        work_key = docs[0].get("key", "")
+        if not work_key:
+            return ""
+
+        work = requests.get(
+            f"https://openlibrary.org{work_key}.json",
+            timeout=5,
+        )
+        work.raise_for_status()
+        desc = work.json().get("description", "")
+        if isinstance(desc, dict):
+            desc = desc.get("value", "")
+        desc = str(desc).strip()
+        if len(desc) > 280:
+            desc = desc[:277] + "…"
+        return desc
+    except Exception:
+        return ""
 
 
 # ── Theme ──────────────────────────────────────────────────────────────────────
@@ -858,12 +894,22 @@ def page_recommendations(books: list[dict]) -> None:
 
     scored.sort(key=lambda x: x[0], reverse=True)
 
+    # Fetch descriptions for top 7 books (cached — only calls API once per book)
+    all_scored = scored[:7]
+    with st.spinner("Fetching book summaries…"):
+        descriptions = {
+            b["id"]: fetch_description(b["title"], b["author"])
+            for _, b, _ in all_scored
+        }
+
     # Top pick
     top_score, top_book, top_reasons = scored[0]
     genres_html = "".join(f'<span class="genre-tag">{g}</span>' for g in (top_book.get("genres") or []))
     priority    = top_book.get("priority")
     p_html      = f'<span class="priority-badge priority-{priority}">{PRIORITY_LABEL[priority]}</span>' if priority else ""
     reason_html = "<br>".join(f"• {r}" for r in top_reasons) if top_reasons else "Good match for your taste"
+    desc        = descriptions.get(top_book["id"], "")
+    desc_html   = f'<div style="font-size:13px;color:{c["body"]};line-height:1.6;margin:10px 0 6px;">{desc}</div>' if desc else ""
 
     st.markdown(f"""
     <div class="section-card" style="border:1px solid #6c63ff44;background:{'#12151f' if c['bg']=='#0f1117' else '#f8f6ff'};">
@@ -873,8 +919,9 @@ def page_recommendations(books: list[dict]) -> None:
             <div style="flex:1;">
                 <div style="font-size:18px;font-weight:700;color:{c['text']};margin-bottom:4px;">{top_book['title']}</div>
                 <div style="font-size:13px;color:{c['muted']};margin-bottom:8px;">{top_book['author']}</div>
-                <div style="margin-bottom:8px;">{p_html}{genres_html}</div>
-                <div style="font-size:12px;color:{c['muted']};line-height:1.6;">{reason_html}</div>
+                <div style="margin-bottom:4px;">{p_html}{genres_html}</div>
+                {desc_html}
+                <div style="font-size:11px;color:{c['muted']};line-height:1.6;margin-top:6px;">{reason_html}</div>
             </div>
         </div>
     </div>
@@ -889,6 +936,8 @@ def page_recommendations(books: list[dict]) -> None:
             priority    = b.get("priority")
             p_html      = f'<span class="priority-badge priority-{priority}">{PRIORITY_LABEL[priority]}</span>' if priority else ""
             r_text      = reasons[0] if reasons else ""
+            desc        = descriptions.get(b["id"], "")
+            desc_html   = f'<div style="font-size:12px;color:{c["body"]};line-height:1.5;margin:6px 0 2px;">{desc}</div>' if desc else ""
             st.markdown(f"""
             <div class="book-card">
                 <div class="book-card-spine" style="background:linear-gradient(180deg,#6c63ff,#a78bfa);"></div>
@@ -896,6 +945,7 @@ def page_recommendations(books: list[dict]) -> None:
                     <div class="book-card-title">{b['title']}</div>
                     <div class="book-card-author">{b['author']}</div>
                     <div class="book-card-tags">{p_html}{genres_html}</div>
+                    {desc_html}
                     <div style="font-size:11px;color:{c['muted']};margin-top:4px;">{r_text}</div>
                 </div>
             </div>
