@@ -115,9 +115,12 @@ def _strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", " ", text).strip()
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
 def fetch_book_details(title: str, author: str) -> dict:
-    """Fetch book details from Google Books API. Cached 24h."""
+    """Fetch book details from Google Books API. Uses session_state as cache."""
+    cache_key = f"_bd_{title}_{author}"
+    if cache_key in st.session_state:
+        return st.session_state[cache_key]
+
     empty = {"summary": "", "description": "", "pages": None, "year": None}
     try:
         items: list = []
@@ -125,7 +128,7 @@ def fetch_book_details(title: str, author: str) -> dict:
             resp = requests.get(
                 "https://www.googleapis.com/books/v1/volumes",
                 params={"q": query, "maxResults": 1},
-                timeout=6,
+                timeout=8,
             )
             resp.raise_for_status()
             items = resp.json().get("items", [])
@@ -133,6 +136,7 @@ def fetch_book_details(title: str, author: str) -> dict:
                 break
 
         if not items:
+            st.session_state[cache_key] = empty
             return empty
 
         info        = items[0].get("volumeInfo", {})
@@ -140,9 +144,13 @@ def fetch_book_details(title: str, author: str) -> dict:
         pages       = info.get("pageCount") or None
         year        = (info.get("publishedDate", "") or "")[:4] or None
         summary     = (description[:220] + "…") if len(description) > 220 else description
+        result      = {"summary": summary, "description": description, "pages": pages, "year": year}
+        st.session_state[cache_key] = result
+        return result
 
-        return {"summary": summary, "description": description, "pages": pages, "year": year}
-    except Exception:
+    except Exception as e:
+        st.session_state[f"_bd_err_{title}"] = f"{type(e).__name__}: {e}"
+        st.session_state[cache_key] = empty
         return empty
 
 
@@ -927,13 +935,19 @@ def page_recommendations(books: list[dict]) -> None:
 
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    # Fetch details for top 7 books (cached — only calls API once per book per day)
+    # Fetch details for top 7 books
     all_scored = scored[:7]
     with st.spinner("A carregar detalhes dos livros…"):
         book_details = {
             b["id"]: fetch_book_details(b["title"], b["author"])
             for _, b, _ in all_scored
         }
+
+    # Debug: show any API errors
+    api_errors = {k: v for k, v in st.session_state.items() if k.startswith("_bd_err_")}
+    if api_errors:
+        for k, v in api_errors.items():
+            st.warning(f"⚠️ Debug — {k.replace('_bd_err_', '')}: {v}")
 
     def _e(t: str) -> str:
         return html_lib.escape(str(t))
