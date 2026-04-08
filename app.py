@@ -112,42 +112,34 @@ def books_to_csv(books: list[dict]) -> str:
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_book_details(title: str, author: str) -> dict:
-    """Fetch book details from Open Library. Returns raw (unescaped) strings. Cached 24h."""
+    """Fetch book details from Google Books API. Returns raw (unescaped) strings. Cached 24h."""
     empty = {"summary": "", "description": "", "pages": None, "year": None}
     try:
-        search = requests.get(
-            "https://openlibrary.org/search.json",
-            params={
-                "title": title, "author": author, "limit": 1,
-                "fields": "key,first_sentence,number_of_pages_median,first_publish_year",
-            },
+        resp = requests.get(
+            "https://www.googleapis.com/books/v1/volumes",
+            params={"q": f'intitle:{title} inauthor:{author}', "maxResults": 1, "langRestrict": "en"},
             timeout=6,
         )
-        search.raise_for_status()
-        docs = search.json().get("docs", [])
-        if not docs:
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
+        if not items:
+            # Retry with title only
+            resp = requests.get(
+                "https://www.googleapis.com/books/v1/volumes",
+                params={"q": f'intitle:{title}', "maxResults": 1},
+                timeout=6,
+            )
+            resp.raise_for_status()
+            items = resp.json().get("items", [])
+        if not items:
             return empty
 
-        doc      = docs[0]
-        work_key = doc.get("key", "")
-        pages    = doc.get("number_of_pages_median")
-        year     = doc.get("first_publish_year")
-
-        # first_sentence as quick summary
-        fs = doc.get("first_sentence") or {}
-        summary = (fs.get("value", "") if isinstance(fs, dict) else str(fs)).strip()
-
-        # Full description from works endpoint
-        description = ""
-        if work_key:
-            work = requests.get(f"https://openlibrary.org{work_key}.json", timeout=6)
-            work.raise_for_status()
-            raw = work.json().get("description", "")
-            description = (raw.get("value", "") if isinstance(raw, dict) else str(raw)).strip()
-
-        # Fallback: use description as summary if first_sentence is empty
-        if not summary and description:
-            summary = description[:220] + "…" if len(description) > 220 else description
+        info        = items[0].get("volumeInfo", {})
+        description = info.get("description", "").strip()
+        pages       = info.get("pageCount")
+        published   = info.get("publishedDate", "")
+        year        = published[:4] if published else None
+        summary     = (description[:220] + "…") if len(description) > 220 else description
 
         return {"summary": summary, "description": description, "pages": pages, "year": year}
     except Exception:
