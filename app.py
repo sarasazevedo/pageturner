@@ -108,6 +108,48 @@ def books_to_csv(books: list[dict]) -> str:
     return output.getvalue()
 
 
+# ── Genre → Open Library subject mapping ──────────────────────────────────────
+
+GENRE_TO_OL_SUBJECT: dict[str, str] = {
+    "Self-Help":  "self_help",
+    "Business":   "business",
+    "Philosophy": "philosophy",
+    "Psychology": "psychology",
+    "Biography":  "biography",
+    "History":    "history",
+    "Science":    "science",
+    "Technology": "technology",
+    "Fiction":    "fiction",
+    "Non-Fiction":"nonfiction",
+    "Economics":  "economics",
+    "Politics":   "politics",
+}
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_genre_books(genre: str, limit: int = 30) -> list[dict]:
+    """Return popular books for a genre from Open Library subjects API."""
+    subject = GENRE_TO_OL_SUBJECT.get(genre, genre.lower().replace(" ", "_"))
+    try:
+        r = requests.get(
+            f"https://openlibrary.org/subjects/{subject}.json",
+            params={"limit": limit},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            results = []
+            for w in r.json().get("works", []):
+                title   = w.get("title", "").strip()
+                authors = w.get("authors", [])
+                author  = authors[0].get("name", "").strip() if authors else ""
+                if title and author:
+                    results.append({"title": title, "author": author, "genres": [genre]})
+            return results
+    except Exception:
+        pass
+    return []
+
+
 # ── Open Library book details ──────────────────────────────────────────────────
 
 def _strip_html(text: str) -> str:
@@ -914,6 +956,7 @@ def page_add_book(books: list[dict]) -> None:
 
 def page_recommendations(books: list[dict]) -> None:
     c = get_theme()
+    card_bg = "#12151f" if c["bg"] == "#0f1117" else "#f0f2f5"
 
     def _e(t: str) -> str:
         return html_lib.escape(str(t))
@@ -922,80 +965,66 @@ def page_recommendations(books: list[dict]) -> None:
     st.markdown('<div class="page-subtitle">Personalized picks based on your reading taste</div>', unsafe_allow_html=True)
 
     read = [b for b in books if b["status"] == "Read"]
-    want = [b for b in books if b["status"] == "Want to Read"]
 
     if not read:
         st.info("No books read yet. Add and rate some books to get recommendations.")
         return
-    if not want:
-        st.info("Your 'Want to Read' list is empty. Add some books there to get recommendations.")
-        return
 
-    # Build taste profile from books rated 4+
-    liked = [b for b in read if (b.get("rating") or 0) >= 4]
-    if not liked:
-        liked = read
+    # ── Build taste profile ───────────────────────────────────────────────────
+    liked = [b for b in read if (b.get("rating") or 0) >= 4] or read
 
-    liked_genres:  dict[str, int] = {}
-    liked_authors: set[str] = set()
+    liked_genres: dict[str, int] = {}
     for b in liked:
-        liked_authors.add(b["author"].lower())
         for g in (b.get("genres") or []):
             liked_genres[g] = liked_genres.get(g, 0) + (b.get("rating") or 3)
 
-    # Score each want-to-read book
-    scored = []
-    for b in want:
-        score = 0
-        reasons: list[str] = []
+    if not liked_genres:
+        st.info("Add genres to your read books to get recommendations.")
+        return
 
-        if b["author"].lower() in liked_authors:
-            score += 5
-            reasons.append(f"You liked other books by {b['author']}")
+    top_genre_names = [g for g, _ in sorted(liked_genres.items(), key=lambda x: x[1], reverse=True)[:3]]
 
-        genre_matches = []
-        for g in (b.get("genres") or []):
-            if g in liked_genres:
-                score += liked_genres[g]
-                genre_matches.append(g)
-        if genre_matches:
-            reasons.append("Matches genres you love: " + ", ".join(genre_matches))
+    # All titles already in library — never recommend these
+    in_library = {b["title"].lower() for b in books}
 
-        priority = b.get("priority")
-        if priority == 1:
-            score += 3
-        elif priority == 2:
-            score += 1
+    # ── Fetch candidates from Open Library subjects API ───────────────────────
+    candidates: list[dict] = []
+    seen: set[str] = set()
 
-        scored.append((score, b, reasons))
+    with st.spinner("Finding books you'll love…"):
+        for genre in top_genre_names:
+            for b in fetch_genre_books(genre):
+                key = b["title"].lower()
+                if key not in in_library and key not in seen:
+                    seen.add(key)
+                    b["reason"] = f"Because you love {genre}"
+                    candidates.append(b)
 
-    scored.sort(key=lambda x: x[0], reverse=True)
+    if not candidates:
+        st.info("Could not load recommendations right now. Try again later.")
+        return
 
-    # Pre-fetch details for top 8 books
-    top8 = scored[:8]
-    book_details: dict[str, dict] = {}
+    top8 = candidates[:8]
+
     with st.spinner("Loading book details…"):
-        for _, b, _ in top8:
-            book_details[b["id"]] = fetch_book_details(b["title"], b["author"])
+        for b in top8:
+            b["_details"] = fetch_book_details(b["title"], b["author"])
 
-    top3  = scored[:3]
-    rest5 = scored[3:8]
+    top3  = top8[:3]
+    rest5 = top8[3:8]
 
     # ── Top 3 Picks ───────────────────────────────────────────────────────────
-    card_bg = "#12151f" if c["bg"] == "#0f1117" else "#f0f2f5"
-
     st.markdown(
         '<div class="section-card" style="border:1px solid #6c63ff44;">'
         '<div class="section-title">⭐ Top Picks For You</div>',
         unsafe_allow_html=True,
     )
     cols = st.columns(3)
-    for col, (_, b, reasons) in zip(cols, top3):
-        details     = book_details[b["id"]]
+    for col, b in zip(cols, top3):
+        details     = b["_details"]
         genres_html = "".join(f'<span class="genre-tag">{_e(g)}</span>' for g in (b.get("genres") or []))
         summary     = details.get("summary") or ""
         short_sum   = (summary[:110] + "…") if len(summary) > 110 else summary
-        reason_html = f'<div style="font-size:11px;color:#a78bfa;margin-top:6px;">✦ {_e(reasons[0])}</div>' if reasons else ""
 
         with col:
             st.markdown(f"""
@@ -1007,10 +1036,10 @@ def page_recommendations(books: list[dict]) -> None:
                 <div style="font-size:12px;color:{c['muted']};margin-bottom:8px;">{_e(b['author'])}</div>
                 <div style="margin-bottom:6px;">{genres_html}</div>
                 <div style="font-size:12px;color:{c['body']};line-height:1.5;min-height:36px;">{_e(short_sum)}</div>
-                {reason_html}
+                <div style="font-size:11px;color:#a78bfa;margin-top:6px;">✦ {_e(b.get('reason', ''))}</div>
             </div>
             """, unsafe_allow_html=True)
-            if st.button("View details", key=f"top_{b['id']}", use_container_width=True):
+            if st.button("View details", key=f"top_{b['title']}", use_container_width=True):
                 _book_dialog(b, details)
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -1021,14 +1050,11 @@ def page_recommendations(books: list[dict]) -> None:
             '<div class="section-card"><div class="section-title">📚 More Recommendations</div>',
             unsafe_allow_html=True,
         )
-        for _, b, reasons in rest5:
-            details     = book_details[b["id"]]
+        for b in rest5:
+            details     = b["_details"]
             genres_html = "".join(f'<span class="genre-tag">{_e(g)}</span>' for g in (b.get("genres") or []))
-            priority    = b.get("priority")
-            p_html      = f'<span class="priority-badge priority-{priority}">{PRIORITY_LABEL[priority]}</span>' if priority else ""
             summary     = details.get("summary") or ""
             short_sum   = (summary[:130] + "…") if len(summary) > 130 else summary
-            reason_txt  = _e(reasons[0]) if reasons else ""
 
             st.markdown(f"""
             <div class="book-card">
@@ -1036,32 +1062,31 @@ def page_recommendations(books: list[dict]) -> None:
                 <div class="book-card-body">
                     <div style="font-size:14px;font-weight:700;color:{c['text']};margin-bottom:2px;">{_e(b['title'])}</div>
                     <div style="font-size:12px;color:{c['muted']};margin-bottom:6px;">{_e(b['author'])}</div>
-                    <div class="book-card-tags">{p_html}{genres_html}</div>
+                    <div class="book-card-tags">{genres_html}</div>
                     <div style="font-size:12px;color:{c['body']};line-height:1.5;margin-top:6px;">{_e(short_sum)}</div>
-                    <div style="font-size:11px;color:#a78bfa;margin-top:4px;">{reason_txt}</div>
+                    <div style="font-size:11px;color:#a78bfa;margin-top:4px;">✦ {_e(b.get('reason', ''))}</div>
                 </div>
             </div>
             """, unsafe_allow_html=True)
-            if st.button("View details", key=f"rec_{b['id']}", use_container_width=False):
+            if st.button("View details", key=f"rec_{b['title']}", use_container_width=False):
                 _book_dialog(b, details)
 
         st.markdown("</div>", unsafe_allow_html=True)
 
     # ── Taste profile ─────────────────────────────────────────────────────────
-    if liked_genres:
-        st.markdown('<div class="section-card"><div class="section-title">🎨 Your taste profile</div>', unsafe_allow_html=True)
-        top_genres = sorted(liked_genres.items(), key=lambda x: x[1], reverse=True)[:6]
-        cols = st.columns(len(top_genres))
-        for col, (genre, score) in zip(cols, top_genres):
-            col.markdown(f"""
-            <div style="text-align:center;padding:12px 8px;background:{card_bg};
-                 border-radius:10px;border:1px solid {c['border']};">
-                <div style="font-size:20px;margin-bottom:4px;">📖</div>
-                <div style="font-size:12px;font-weight:600;color:{c['text']};">{genre}</div>
-                <div style="font-size:10px;color:{c['muted']};margin-top:2px;">score {score}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown('<div class="section-card"><div class="section-title">🎨 Your taste profile</div>', unsafe_allow_html=True)
+    profile_genres = sorted(liked_genres.items(), key=lambda x: x[1], reverse=True)[:6]
+    cols = st.columns(len(profile_genres))
+    for col, (genre, score) in zip(cols, profile_genres):
+        col.markdown(f"""
+        <div style="text-align:center;padding:12px 8px;background:{card_bg};
+             border-radius:10px;border:1px solid {c['border']};">
+            <div style="font-size:20px;margin-bottom:4px;">📖</div>
+            <div style="font-size:12px;font-weight:600;color:{c['text']};">{genre}</div>
+            <div style="font-size:10px;color:{c['muted']};margin-top:2px;">score {score}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ── Page: Stats ────────────────────────────────────────────────────────────────
