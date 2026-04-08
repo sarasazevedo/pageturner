@@ -115,97 +115,85 @@ def _strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", " ", text).strip()
 
 
-def _fetch_wikipedia(title: str, author: str) -> str:
-    """Fetch book description from Wikipedia. Returns empty string on failure."""
-    try:
-        search = requests.get(
-            "https://en.wikipedia.org/w/api.php",
-            params={"action": "query", "list": "search", "format": "json",
-                    "srsearch": f"{title} {author} book", "srlimit": 1},
-            timeout=6,
-        )
-        search.raise_for_status()
-        hits = search.json().get("query", {}).get("search", [])
-        if not hits:
-            return ""
-        page_id = hits[0]["pageid"]
-        extract = requests.get(
-            "https://en.wikipedia.org/w/api.php",
-            params={"action": "query", "prop": "extracts", "exintro": 1,
-                    "explaintext": 1, "pageids": page_id, "format": "json"},
-            timeout=6,
-        )
-        extract.raise_for_status()
-        raw = (extract.json().get("query", {})
-               .get("pages", {}).get(str(page_id), {})
-               .get("extract", "").strip())
-        paragraphs = [p.strip() for p in raw.split("\n") if p.strip()]
-        return " ".join(paragraphs[:2])
-    except Exception:
-        return ""
-
-
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_book_details(title: str, author: str) -> dict:
     """
-    Tries Google Books API first (requires GOOGLE_BOOKS_KEY secret).
-    Falls back to Wikipedia for description + Open Library for pages/year.
+    1. Google Books API (if GOOGLE_BOOKS_KEY secret exists)
+    2. Wikipedia for description + Open Library for pages/year
+    Never caches failures — raises so st.cache_data skips caching.
     """
-    cache_key = f"_bd_{title}_{author}"
-    if cache_key in st.session_state:
-        return st.session_state[cache_key]
+    result = {"summary": "", "description": "", "pages": None, "year": None}
 
-    empty = {"summary": "", "description": "", "pages": None, "year": None}
-    result = dict(empty)
-
-    # ── Try Google Books (if key is configured) ────────────────────────────
+    # ── Google Books ───────────────────────────────────────────────────────
     try:
         api_key = st.secrets.get("GOOGLE_BOOKS_KEY", "")
         if api_key:
-            items: list = []
             for query in [f'intitle:"{title}" inauthor:"{author}"', f'intitle:"{title}"']:
-                resp = requests.get(
+                r = requests.get(
                     "https://www.googleapis.com/books/v1/volumes",
                     params={"q": query, "maxResults": 1, "key": api_key},
                     timeout=8,
                 )
-                resp.raise_for_status()
-                items = resp.json().get("items", [])
+                r.raise_for_status()
+                items = r.json().get("items", [])
                 if items:
-                    break
-            if items:
-                info        = items[0].get("volumeInfo", {})
-                description = _strip_html(info.get("description", ""))
-                result["pages"]       = info.get("pageCount") or None
-                result["year"]        = (info.get("publishedDate", "") or "")[:4] or None
-                result["description"] = description
-                result["summary"]     = (description[:220] + "…") if len(description) > 220 else description
-                st.session_state[cache_key] = result
-                return result
+                    info = items[0]["volumeInfo"]
+                    desc = _strip_html(info.get("description", ""))
+                    result.update({
+                        "description": desc,
+                        "summary":     (desc[:220] + "…") if len(desc) > 220 else desc,
+                        "pages":       info.get("pageCount") or None,
+                        "year":        (info.get("publishedDate", "") or "")[:4] or None,
+                    })
+                    return result
     except Exception:
-        pass  # fall through to Wikipedia
+        pass
 
-    # ── Fallback: Wikipedia (description) + Open Library (pages/year) ─────
+    # ── Open Library: pages + year ─────────────────────────────────────────
     try:
-        ol = requests.get(
+        r = requests.get(
             "https://openlibrary.org/search.json",
             params={"title": title, "author": author, "limit": 1,
                     "fields": "number_of_pages_median,first_publish_year"},
             timeout=6,
         )
-        ol.raise_for_status()
-        docs = ol.json().get("docs", [])
+        r.raise_for_status()
+        docs = r.json().get("docs", [])
         if docs:
             result["pages"] = docs[0].get("number_of_pages_median") or None
             result["year"]  = str(docs[0].get("first_publish_year") or "") or None
     except Exception:
         pass
 
-    description = _fetch_wikipedia(title, author)
-    if description:
-        result["description"] = description
-        result["summary"]     = (description[:220] + "…") if len(description) > 220 else description
+    # ── Wikipedia: description ─────────────────────────────────────────────
+    try:
+        r = requests.get(
+            "https://en.wikipedia.org/w/api.php",
+            params={"action": "query", "list": "search", "format": "json",
+                    "srsearch": f"{title} {author} book", "srlimit": 1},
+            timeout=6,
+        )
+        r.raise_for_status()
+        hits = r.json().get("query", {}).get("search", [])
+        if hits:
+            pid = hits[0]["pageid"]
+            r2 = requests.get(
+                "https://en.wikipedia.org/w/api.php",
+                params={"action": "query", "prop": "extracts", "exintro": 1,
+                        "explaintext": 1, "pageids": pid, "format": "json"},
+                timeout=6,
+            )
+            r2.raise_for_status()
+            raw = (r2.json().get("query", {})
+                   .get("pages", {}).get(str(pid), {})
+                   .get("extract", "").strip())
+            paras = [p.strip() for p in raw.split("\n") if p.strip()]
+            desc  = " ".join(paras[:2])
+            result["description"] = desc
+            result["summary"]     = (desc[:220] + "…") if len(desc) > 220 else desc
+    except Exception:
+        pass
 
-    st.session_state[cache_key] = result
     return result
 
 
@@ -992,11 +980,13 @@ def page_recommendations(books: list[dict]) -> None:
 
     # Fetch details for top 7 books
     all_scored = scored[:7]
+    book_details = {}
     with st.spinner("A carregar detalhes dos livros…"):
-        book_details = {
-            b["id"]: fetch_book_details(b["title"], b["author"])
-            for _, b, _ in all_scored
-        }
+        for _, b, _ in all_scored:
+            try:
+                book_details[b["id"]] = fetch_book_details(b["title"], b["author"])
+            except Exception:
+                book_details[b["id"]] = {"summary": "", "description": "", "pages": None, "year": None}
 
 
     def _e(t: str) -> str:
