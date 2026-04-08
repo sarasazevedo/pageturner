@@ -988,23 +988,37 @@ def page_recommendations(books: list[dict]) -> None:
         st.info("Add genres to your read books to get recommendations.")
         return
 
-    top_genre_names = [g for g, _ in sorted(liked_genres.items(), key=lambda x: x[1], reverse=True)[:3]]
+    top_genre_names = [g for g, _ in sorted(liked_genres.items(), key=lambda x: x[1], reverse=True)[:6]]
 
     # All titles already in library — never recommend these
     in_library = {b["title"].lower() for b in books}
 
-    # ── Fetch candidates from Open Library subjects API ───────────────────────
-    candidates: list[dict] = []
-    seen: set[str] = set()
+    # ── Fetch candidates per genre, then round-robin to mix them ─────────────
+    per_genre: dict[str, list[dict]] = {}
 
     with st.spinner("Finding books you'll love…"):
+        seen: set[str] = set()
         for genre in top_genre_names:
+            pool = []
             for b in fetch_genre_books(genre):
                 key = b["title"].lower()
                 if key not in in_library and key not in seen:
                     seen.add(key)
                     b["reason"] = f"Because you love {genre}"
-                    candidates.append(b)
+                    pool.append(b)
+            per_genre[genre] = pool
+
+    # Round-robin: 1 book from each genre in turn until we have 8
+    candidates: list[dict] = []
+    queues = [per_genre[g] for g in top_genre_names if per_genre.get(g)]
+    i = 0
+    while len(candidates) < 8 and any(queues):
+        q = queues[i % len(queues)]
+        if q:
+            candidates.append(q.pop(0))
+        i += 1
+        if i > 200:  # safety cap
+            break
 
     if not candidates:
         st.info("Could not load recommendations right now. Try again later.")
