@@ -978,6 +978,83 @@ def page_recommendations(books: list[dict]) -> None:
 
     scored.sort(key=lambda x: x[0], reverse=True)
 
+    # ── Debug panel ───────────────────────────────────────────────────────────
+    with st.expander("🔧 Debug API (remove after fix)"):
+        test_title  = "The Almanack of Naval Ravikant"
+        test_author = "Eric Jorgenson"
+        if st.button("Test APIs now", key="debug_api_btn"):
+            st.write(f"Testing: **{test_title}** by {test_author}")
+
+            # Google Books
+            try:
+                api_key = st.secrets.get("GOOGLE_BOOKS_KEY", "")
+                st.write(f"Google Books key present: `{bool(api_key)}`")
+                if api_key:
+                    r = requests.get(
+                        "https://www.googleapis.com/books/v1/volumes",
+                        params={"q": f'intitle:"{test_title}"', "maxResults": 1, "key": api_key},
+                        timeout=8,
+                    )
+                    st.write(f"Google Books status: `{r.status_code}`")
+                    if r.status_code == 200:
+                        items = r.json().get("items", [])
+                        st.write(f"Google Books items: `{len(items)}`")
+                        if items:
+                            info = items[0]["volumeInfo"]
+                            st.write(f"pageCount: `{info.get('pageCount')}` | publishedDate: `{info.get('publishedDate')}` | description[:100]: `{(info.get('description') or '')[:100]}`")
+                    else:
+                        st.write(f"Google Books error body: `{r.text[:300]}`")
+            except Exception as ex:
+                st.write(f"Google Books exception: `{ex}`")
+
+            # Open Library
+            try:
+                r2 = requests.get(
+                    "https://openlibrary.org/search.json",
+                    params={"title": test_title, "author": test_author, "limit": 1,
+                            "fields": "number_of_pages_median,first_publish_year"},
+                    timeout=8,
+                )
+                st.write(f"Open Library status: `{r2.status_code}`")
+                if r2.status_code == 200:
+                    docs = r2.json().get("docs", [])
+                    st.write(f"Open Library docs: `{docs}`")
+                else:
+                    st.write(f"Open Library error: `{r2.text[:200]}`")
+            except Exception as ex:
+                st.write(f"Open Library exception: `{ex}`")
+
+            # Wikipedia
+            try:
+                r3 = requests.get(
+                    "https://en.wikipedia.org/w/api.php",
+                    params={"action": "query", "list": "search", "format": "json",
+                            "srsearch": f"{test_title} {test_author} book", "srlimit": 1},
+                    timeout=8,
+                )
+                st.write(f"Wikipedia search status: `{r3.status_code}`")
+                if r3.status_code == 200:
+                    hits = r3.json().get("query", {}).get("search", [])
+                    st.write(f"Wikipedia hits: `{len(hits)}`")
+                    if hits:
+                        st.write(f"Wikipedia top hit title: `{hits[0].get('title')}`")
+                        pid = hits[0]["pageid"]
+                        r4 = requests.get(
+                            "https://en.wikipedia.org/w/api.php",
+                            params={"action": "query", "prop": "extracts", "exintro": 1,
+                                    "explaintext": 1, "pageids": pid, "format": "json"},
+                            timeout=8,
+                        )
+                        st.write(f"Wikipedia extract status: `{r4.status_code}`")
+                        if r4.status_code == 200:
+                            raw = (r4.json().get("query", {}).get("pages", {})
+                                   .get(str(pid), {}).get("extract", ""))
+                            st.write(f"Wikipedia extract[:200]: `{raw[:200]}`")
+                else:
+                    st.write(f"Wikipedia error: `{r3.text[:200]}`")
+            except Exception as ex:
+                st.write(f"Wikipedia exception: `{ex}`")
+
     # Fetch details for top 7 books
     all_scored = scored[:7]
     book_details = {}
