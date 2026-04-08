@@ -110,35 +110,35 @@ def books_to_csv(books: list[dict]) -> str:
 
 # ── Open Library book details ──────────────────────────────────────────────────
 
+def _strip_html(text: str) -> str:
+    import re
+    return re.sub(r"<[^>]+>", " ", text).strip()
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_book_details(title: str, author: str) -> dict:
-    """Fetch book details from Google Books API. Returns raw (unescaped) strings. Cached 24h."""
+    """Fetch book details from Google Books API. Cached 24h."""
     empty = {"summary": "", "description": "", "pages": None, "year": None}
     try:
-        resp = requests.get(
-            "https://www.googleapis.com/books/v1/volumes",
-            params={"q": f'intitle:{title} inauthor:{author}', "maxResults": 1, "langRestrict": "en"},
-            timeout=6,
-        )
-        resp.raise_for_status()
-        items = resp.json().get("items", [])
-        if not items:
-            # Retry with title only
+        items: list = []
+        for query in [f'intitle:"{title}" inauthor:"{author}"', f'intitle:"{title}"']:
             resp = requests.get(
                 "https://www.googleapis.com/books/v1/volumes",
-                params={"q": f'intitle:{title}', "maxResults": 1},
+                params={"q": query, "maxResults": 1},
                 timeout=6,
             )
             resp.raise_for_status()
             items = resp.json().get("items", [])
+            if items:
+                break
+
         if not items:
             return empty
 
         info        = items[0].get("volumeInfo", {})
-        description = info.get("description", "").strip()
-        pages       = info.get("pageCount")
-        published   = info.get("publishedDate", "")
-        year        = published[:4] if published else None
+        description = _strip_html(info.get("description", ""))
+        pages       = info.get("pageCount") or None
+        year        = (info.get("publishedDate", "") or "")[:4] or None
         summary     = (description[:220] + "…") if len(description) > 220 else description
 
         return {"summary": summary, "description": description, "pages": pages, "year": year}
@@ -148,23 +148,22 @@ def fetch_book_details(title: str, author: str) -> dict:
 
 @st.dialog("📚 Book details")
 def _book_dialog(b: dict, details: dict) -> None:
-    c = get_theme()
     priority = b.get("priority")
 
     st.markdown(f"### {b['title']}")
-    st.markdown(f"*{b['author']}*")
+    st.markdown(f"*by {b['author']}*")
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("📅 Published", details["year"] or "—")
-    col2.metric("📄 Pages", details["pages"] or "—")
+    col1, col2 = st.columns(2)
+    col1.metric("📅 Published", details.get("year") or "—")
+    col2.metric("📄 Pages", details.get("pages") or "—")
+
+    meta_parts = []
     if priority:
-        col3.markdown(f'<span class="priority-badge priority-{priority}">{PRIORITY_LABEL[priority]}</span>',
-                      unsafe_allow_html=True)
-
-    genres = b.get("genres") or []
-    if genres:
-        tags = " ".join(f'<span class="genre-tag">{g}</span>' for g in genres)
-        st.markdown(tags, unsafe_allow_html=True)
+        meta_parts.append(f'<span class="priority-badge priority-{priority}">{PRIORITY_LABEL[priority]}</span>')
+    for g in (b.get("genres") or []):
+        meta_parts.append(f'<span class="genre-tag">{html_lib.escape(g)}</span>')
+    if meta_parts:
+        st.markdown(" ".join(meta_parts), unsafe_allow_html=True)
 
     st.divider()
 
@@ -173,7 +172,7 @@ def _book_dialog(b: dict, details: dict) -> None:
         st.markdown("**About this book**")
         st.write(desc)
     else:
-        st.info("No description found on Open Library for this book.")
+        st.info("No description available for this book.")
 
 
 # ── Theme ──────────────────────────────────────────────────────────────────────
