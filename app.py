@@ -235,6 +235,10 @@ def fetch_book_details(title: str, author: str) -> dict:
         except Exception:
             pass
 
+    # Don't cache completely empty results — next call will retry
+    if not result["description"] and not result["pages"] and not result["year"]:
+        raise RuntimeError("No data — skipping cache")
+
     return result
 
 
@@ -1028,7 +1032,10 @@ def page_recommendations(books: list[dict]) -> None:
 
     with st.spinner("Loading book details…"):
         for b in top8:
-            b["_details"] = fetch_book_details(b["title"], b["author"])
+            try:
+                b["_details"] = fetch_book_details(b["title"], b["author"])
+            except Exception:
+                b["_details"] = {"summary": "", "description": "", "pages": None, "year": None}
 
     top3  = top8[:3]
     rest5 = top8[3:8]
