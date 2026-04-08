@@ -127,22 +127,28 @@ GENRE_TO_OL_SUBJECT: dict[str, str] = {
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def fetch_genre_books(genre: str, limit: int = 30) -> list[dict]:
-    """Return popular books for a genre from Open Library subjects API."""
+def fetch_genre_books(genre: str, limit: int = 50) -> list[dict]:
+    """Return popular recent books (2000+) for a genre from Open Library search API."""
     subject = GENRE_TO_OL_SUBJECT.get(genre, genre.lower().replace(" ", "_"))
     try:
         r = requests.get(
-            f"https://openlibrary.org/subjects/{subject}.json",
-            params={"limit": limit},
+            "https://openlibrary.org/search.json",
+            params={
+                "subject": subject,
+                "limit": limit,
+                "sort": "rating",
+                "fields": "title,author_name,first_publish_year",
+            },
             timeout=10,
         )
         if r.status_code == 200:
             results = []
-            for w in r.json().get("works", []):
-                title   = w.get("title", "").strip()
-                authors = w.get("authors", [])
-                author  = authors[0].get("name", "").strip() if authors else ""
-                if title and author:
+            for doc in r.json().get("docs", []):
+                title   = doc.get("title", "").strip()
+                authors = doc.get("author_name", [])
+                author  = authors[0].strip() if authors else ""
+                year    = doc.get("first_publish_year")
+                if title and author and year and int(year) >= 2000:
                     results.append({"title": title, "author": author, "genres": [genre]})
             return results
     except Exception:
