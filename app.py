@@ -4,6 +4,7 @@ import io
 from datetime import datetime, date
 from pathlib import Path
 
+import html as html_lib
 import requests
 import streamlit as st
 import pandas as pd
@@ -137,7 +138,7 @@ def fetch_description(title: str, author: str) -> str:
         desc = str(desc).strip()
         if len(desc) > 280:
             desc = desc[:277] + "…"
-        return desc
+        return html_lib.escape(desc)
     except Exception:
         return ""
 
@@ -902,54 +903,50 @@ def page_recommendations(books: list[dict]) -> None:
             for _, b, _ in all_scored
         }
 
+    def _e(t: str) -> str:
+        return html_lib.escape(str(t))
+
     # Top pick
     top_score, top_book, top_reasons = scored[0]
-    genres_html = "".join(f'<span class="genre-tag">{g}</span>' for g in (top_book.get("genres") or []))
+    genres_html = "".join(f'<span class="genre-tag">{_e(g)}</span>' for g in (top_book.get("genres") or []))
     priority    = top_book.get("priority")
     p_html      = f'<span class="priority-badge priority-{priority}">{PRIORITY_LABEL[priority]}</span>' if priority else ""
-    reason_html = "<br>".join(f"• {r}" for r in top_reasons) if top_reasons else "Good match for your taste"
-    desc        = descriptions.get(top_book["id"], "")
-    desc_html   = f'<div style="font-size:13px;color:{c["body"]};line-height:1.6;margin:10px 0 6px;">{desc}</div>' if desc else ""
+    reasons_safe = "<br>".join(f"• {_e(r)}" for r in top_reasons) if top_reasons else "Good match for your taste"
+    desc         = descriptions.get(top_book["id"], "")  # already escaped by fetch_description
+    desc_html    = f'<div style="font-size:13px;color:{c["body"]};line-height:1.6;margin:10px 0 6px;">{desc}</div>' if desc else ""
 
-    st.markdown(f"""
-    <div class="section-card" style="border:1px solid #6c63ff44;background:{'#12151f' if c['bg']=='#0f1117' else '#f8f6ff'};">
-        <div class="section-title">⭐ Top Pick</div>
-        <div style="display:flex;gap:16px;align-items:flex-start;">
-            <div style="width:6px;border-radius:4px;background:linear-gradient(180deg,#6c63ff,#a78bfa);flex-shrink:0;min-height:80px;"></div>
-            <div style="flex:1;">
-                <div style="font-size:18px;font-weight:700;color:{c['text']};margin-bottom:4px;">{top_book['title']}</div>
-                <div style="font-size:13px;color:{c['muted']};margin-bottom:8px;">{top_book['author']}</div>
-                <div style="margin-bottom:4px;">{p_html}{genres_html}</div>
-                {desc_html}
-                <div style="font-size:11px;color:{c['muted']};line-height:1.6;margin-top:6px;">{reason_html}</div>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(f"""<div class="section-card" style="border:1px solid #6c63ff44;">
+<div class="section-title">⭐ Top Pick</div>
+<div style="display:flex;gap:16px;align-items:flex-start;">
+<div style="width:6px;border-radius:4px;background:linear-gradient(180deg,#6c63ff,#a78bfa);flex-shrink:0;min-height:80px;"></div>
+<div style="flex:1;">
+<div style="font-size:18px;font-weight:700;color:{c['text']};margin-bottom:4px;">{_e(top_book['title'])}</div>
+<div style="font-size:13px;color:{c['muted']};margin-bottom:8px;">{_e(top_book['author'])}</div>
+<div style="margin-bottom:4px;">{p_html}{genres_html}</div>
+{desc_html}
+<div style="font-size:11px;color:{c['muted']};line-height:1.6;margin-top:6px;">{reasons_safe}</div>
+</div></div></div>""", unsafe_allow_html=True)
 
     # Other recommendations
     rest = scored[1:7]
     if rest:
         st.markdown('<div class="section-card"><div class="section-title">📚 Also recommended</div>', unsafe_allow_html=True)
         for _, b, reasons in rest:
-            genres_html = "".join(f'<span class="genre-tag">{g}</span>' for g in (b.get("genres") or []))
+            genres_html = "".join(f'<span class="genre-tag">{_e(g)}</span>' for g in (b.get("genres") or []))
             priority    = b.get("priority")
             p_html      = f'<span class="priority-badge priority-{priority}">{PRIORITY_LABEL[priority]}</span>' if priority else ""
-            r_text      = reasons[0] if reasons else ""
+            r_text      = _e(reasons[0]) if reasons else ""
             desc        = descriptions.get(b["id"], "")
             desc_html   = f'<div style="font-size:12px;color:{c["body"]};line-height:1.5;margin:6px 0 2px;">{desc}</div>' if desc else ""
-            st.markdown(f"""
-            <div class="book-card">
-                <div class="book-card-spine" style="background:linear-gradient(180deg,#6c63ff,#a78bfa);"></div>
-                <div class="book-card-body">
-                    <div class="book-card-title">{b['title']}</div>
-                    <div class="book-card-author">{b['author']}</div>
-                    <div class="book-card-tags">{p_html}{genres_html}</div>
-                    {desc_html}
-                    <div style="font-size:11px;color:{c['muted']};margin-top:4px;">{r_text}</div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f"""<div class="book-card">
+<div class="book-card-spine" style="background:linear-gradient(180deg,#6c63ff,#a78bfa);"></div>
+<div class="book-card-body">
+<div class="book-card-title">{_e(b['title'])}</div>
+<div class="book-card-author">{_e(b['author'])}</div>
+<div class="book-card-tags">{p_html}{genres_html}</div>
+{desc_html}
+<div style="font-size:11px;color:{c['muted']};margin-top:4px;">{r_text}</div>
+</div></div>""", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
     # Taste profile
