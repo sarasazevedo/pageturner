@@ -108,39 +108,80 @@ def books_to_csv(books: list[dict]) -> str:
     return output.getvalue()
 
 
-# ── Open Library descriptions ─────────────────────────────────────────────────
+# ── Open Library book details ──────────────────────────────────────────────────
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def fetch_description(title: str, author: str) -> str:
-    """Fetch a book description from Open Library. Cached for 24h."""
+def fetch_book_details(title: str, author: str) -> dict:
+    """Fetch book details from Open Library. Returns raw (unescaped) strings. Cached 24h."""
+    empty = {"summary": "", "description": "", "pages": None, "year": None}
     try:
         search = requests.get(
             "https://openlibrary.org/search.json",
-            params={"title": title, "author": author, "limit": 1, "fields": "key"},
-            timeout=5,
+            params={
+                "title": title, "author": author, "limit": 1,
+                "fields": "key,first_sentence,number_of_pages_median,first_publish_year",
+            },
+            timeout=6,
         )
         search.raise_for_status()
         docs = search.json().get("docs", [])
         if not docs:
-            return ""
-        work_key = docs[0].get("key", "")
-        if not work_key:
-            return ""
+            return empty
 
-        work = requests.get(
-            f"https://openlibrary.org{work_key}.json",
-            timeout=5,
-        )
-        work.raise_for_status()
-        desc = work.json().get("description", "")
-        if isinstance(desc, dict):
-            desc = desc.get("value", "")
-        desc = str(desc).strip()
-        if len(desc) > 280:
-            desc = desc[:277] + "…"
-        return html_lib.escape(desc)
+        doc      = docs[0]
+        work_key = doc.get("key", "")
+        pages    = doc.get("number_of_pages_median")
+        year     = doc.get("first_publish_year")
+
+        # first_sentence as quick summary
+        fs = doc.get("first_sentence") or {}
+        summary = (fs.get("value", "") if isinstance(fs, dict) else str(fs)).strip()
+
+        # Full description from works endpoint
+        description = ""
+        if work_key:
+            work = requests.get(f"https://openlibrary.org{work_key}.json", timeout=6)
+            work.raise_for_status()
+            raw = work.json().get("description", "")
+            description = (raw.get("value", "") if isinstance(raw, dict) else str(raw)).strip()
+
+        # Fallback: use description as summary if first_sentence is empty
+        if not summary and description:
+            summary = description[:220] + "…" if len(description) > 220 else description
+
+        return {"summary": summary, "description": description, "pages": pages, "year": year}
     except Exception:
-        return ""
+        return empty
+
+
+@st.dialog("📚 Book details")
+def _book_dialog(b: dict, details: dict) -> None:
+    c = get_theme()
+    priority = b.get("priority")
+
+    st.markdown(f"### {b['title']}")
+    st.markdown(f"*{b['author']}*")
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("📅 Published", details["year"] or "—")
+    col2.metric("📄 Pages", details["pages"] or "—")
+    if priority:
+        col3.markdown(f'<span class="priority-badge priority-{priority}">{PRIORITY_LABEL[priority]}</span>',
+                      unsafe_allow_html=True)
+
+    genres = b.get("genres") or []
+    if genres:
+        tags = " ".join(f'<span class="genre-tag">{g}</span>' for g in genres)
+        st.markdown(tags, unsafe_allow_html=True)
+
+    st.divider()
+
+    desc = details.get("description") or details.get("summary") or ""
+    if desc:
+        st.markdown("**About this book**")
+        st.write(desc)
+    else:
+        st.info("No description found on Open Library for this book.")
 
 
 # ── Theme ──────────────────────────────────────────────────────────────────────
@@ -895,58 +936,52 @@ def page_recommendations(books: list[dict]) -> None:
 
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    # Fetch descriptions for top 7 books (cached — only calls API once per book)
+    # Fetch details for top 7 books (cached — only calls API once per book per day)
     all_scored = scored[:7]
-    with st.spinner("Fetching book summaries…"):
-        descriptions = {
-            b["id"]: fetch_description(b["title"], b["author"])
+    with st.spinner("A carregar detalhes dos livros…"):
+        book_details = {
+            b["id"]: fetch_book_details(b["title"], b["author"])
             for _, b, _ in all_scored
         }
 
     def _e(t: str) -> str:
         return html_lib.escape(str(t))
 
+    def _render_card(b: dict, details: dict, reasons: list, spine_color: str, large: bool = False) -> None:
+        priority    = b.get("priority")
+        genres_html = "".join(f'<span class="genre-tag">{_e(g)}</span>' for g in (b.get("genres") or []))
+        p_html      = f'<span class="priority-badge priority-{priority}">{PRIORITY_LABEL[priority]}</span>' if priority else ""
+        summary     = details.get("summary", "")
+        summary_html = (f'<div style="font-size:{"13" if large else "12"}px;color:{c["body"]};'
+                        f'line-height:1.6;margin:8px 0 4px;">{_e(summary)}</div>') if summary else ""
+        r_text      = _e(reasons[0]) if reasons else ""
+        title_size  = "18px" if large else "14px"
+
+        st.markdown(f"""<div class="book-card">
+<div class="book-card-spine" style="background:linear-gradient(180deg,{spine_color});"></div>
+<div class="book-card-body">
+<div style="font-size:{title_size};font-weight:700;color:{c['text']};margin-bottom:2px;">{_e(b['title'])}</div>
+<div style="font-size:12px;color:{c['muted']};margin-bottom:6px;">{_e(b['author'])}</div>
+<div class="book-card-tags">{p_html}{genres_html}</div>
+{summary_html}
+<div style="font-size:11px;color:{c['muted']};margin-top:4px;">{r_text}</div>
+</div></div>""", unsafe_allow_html=True)
+
+        if st.button("📖 More details", key=f"details_{b['id']}", use_container_width=False):
+            _book_dialog(b, details)
+
     # Top pick
     top_score, top_book, top_reasons = scored[0]
-    genres_html = "".join(f'<span class="genre-tag">{_e(g)}</span>' for g in (top_book.get("genres") or []))
-    priority    = top_book.get("priority")
-    p_html      = f'<span class="priority-badge priority-{priority}">{PRIORITY_LABEL[priority]}</span>' if priority else ""
-    reasons_safe = "<br>".join(f"• {_e(r)}" for r in top_reasons) if top_reasons else "Good match for your taste"
-    desc         = descriptions.get(top_book["id"], "")  # already escaped by fetch_description
-    desc_html    = f'<div style="font-size:13px;color:{c["body"]};line-height:1.6;margin:10px 0 6px;">{desc}</div>' if desc else ""
-
-    st.markdown(f"""<div class="section-card" style="border:1px solid #6c63ff44;">
-<div class="section-title">⭐ Top Pick</div>
-<div style="display:flex;gap:16px;align-items:flex-start;">
-<div style="width:6px;border-radius:4px;background:linear-gradient(180deg,#6c63ff,#a78bfa);flex-shrink:0;min-height:80px;"></div>
-<div style="flex:1;">
-<div style="font-size:18px;font-weight:700;color:{c['text']};margin-bottom:4px;">{_e(top_book['title'])}</div>
-<div style="font-size:13px;color:{c['muted']};margin-bottom:8px;">{_e(top_book['author'])}</div>
-<div style="margin-bottom:4px;">{p_html}{genres_html}</div>
-{desc_html}
-<div style="font-size:11px;color:{c['muted']};line-height:1.6;margin-top:6px;">{reasons_safe}</div>
-</div></div></div>""", unsafe_allow_html=True)
+    st.markdown('<div class="section-card" style="border:1px solid #6c63ff44;"><div class="section-title">⭐ Top Pick</div>', unsafe_allow_html=True)
+    _render_card(top_book, book_details[top_book["id"]], top_reasons, "#6c63ff,#a78bfa", large=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
     # Other recommendations
     rest = scored[1:7]
     if rest:
         st.markdown('<div class="section-card"><div class="section-title">📚 Also recommended</div>', unsafe_allow_html=True)
         for _, b, reasons in rest:
-            genres_html = "".join(f'<span class="genre-tag">{_e(g)}</span>' for g in (b.get("genres") or []))
-            priority    = b.get("priority")
-            p_html      = f'<span class="priority-badge priority-{priority}">{PRIORITY_LABEL[priority]}</span>' if priority else ""
-            r_text      = _e(reasons[0]) if reasons else ""
-            desc        = descriptions.get(b["id"], "")
-            desc_html   = f'<div style="font-size:12px;color:{c["body"]};line-height:1.5;margin:6px 0 2px;">{desc}</div>' if desc else ""
-            st.markdown(f"""<div class="book-card">
-<div class="book-card-spine" style="background:linear-gradient(180deg,#6c63ff,#a78bfa);"></div>
-<div class="book-card-body">
-<div class="book-card-title">{_e(b['title'])}</div>
-<div class="book-card-author">{_e(b['author'])}</div>
-<div class="book-card-tags">{p_html}{genres_html}</div>
-{desc_html}
-<div style="font-size:11px;color:{c['muted']};margin-top:4px;">{r_text}</div>
-</div></div>""", unsafe_allow_html=True)
+            _render_card(b, book_details[b["id"]], reasons, "#6c63ff,#a78bfa")
         st.markdown("</div>", unsafe_allow_html=True)
 
     # Taste profile
